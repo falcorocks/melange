@@ -1,0 +1,104 @@
+name: network capability
+
+# Matrix that proves capabilities.networking is enforced by every runner.
+#
+# Each job runs hack/network-capability/run.sh for one runner. The script
+# builds two probe packages whose pipelines self-assert the sandbox network
+# state (blocked when networking:false, reachable when networking:true), so a
+# green job means that runner honored the flag in both directions.
+
+on:
+  push:
+    branches: ["main", "falcorocks/**"]
+  pull_request:
+    branches: ["main"]
+
+permissions: {}
+
+jobs:
+  bubblewrap:
+    name: bubblewrap
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    container:
+      image: alpine:latest
+      options: |
+        --cap-add NET_ADMIN --cap-add SYS_ADMIN --security-opt seccomp=unconfined --security-opt apparmor:unconfined
+    steps:
+      - uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: "go.mod"
+      - name: Fetch dependencies
+        run: apk add bash go build-base git bubblewrap curl
+      - name: Run network capability matrix (bubblewrap)
+        run: ./hack/network-capability/run.sh bubblewrap
+
+  docker:
+    name: docker
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: "go.mod"
+      - name: Run network capability matrix (docker)
+        run: ./hack/network-capability/run.sh docker
+
+  qemu:
+    name: qemu
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # melange's qemu runner boots a microvm and needs /dev/kvm plus a guest
+    # kernel whose modules (9pnet_virtio etc.) match. The host's kernel modules
+    # are not present in the guest rootfs, so we use a wolfi/alpine linux-virt
+    # kernel package via QEMU_KERNEL_IMAGE/QEMU_KERNEL_MODULES, mirroring how
+    # melange's own wolfi-presubmit workflow runs the qemu runner. KVM is made
+    # accessible on the GitHub-hosted runner via a udev rule.
+    timeout-minutes: 20
+    steps:
+      - uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: "go.mod"
+      - name: Download kernel for VM
+        run: |
+          KERNEL_PKG="$(curl -sL https://dl-cdn.alpinelinux.org/alpine/edge/main/x86_64/APKINDEX.tar.gz | tar -Oxz APKINDEX | awk -F':' '$1 == "P" {printf "%s-", $2} $1 == "V" {printf "%s.apk\n", $2}' | grep "linux-virt" | grep -v dev)"
+          curl -LSo linux-virt.apk "https://dl-cdn.alpinelinux.org/alpine/edge/main/x86_64/$KERNEL_PKG"
+          mkdir -p /tmp/kernel
+          tar -xf ./linux-virt.apk -C /tmp/kernel/
+      - name: Install QEMU/KVM
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install qemu-system-x86-64 qemu-kvm
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          test -e /dev/kvm && echo "/dev/kvm present"
+      - name: Run network capability matrix (qemu)
+        env:
+          QEMU_KERNEL_IMAGE: /tmp/kernel/boot/vmlinuz-virt
+          QEMU_KERNEL_MODULES: /tmp/kernel/lib/modules/
+        run: ./hack/network-capability/run.sh qemu

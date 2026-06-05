@@ -1,0 +1,33 @@
+package:
+  name: net-open
+  version: 0.0.1
+  epoch: 0
+  description: asserts the build sandbox HAS network when capabilities.networking is true
+  copyright:
+    - license: Apache-2.0
+
+environment:
+  contents:
+    repositories:
+      - https://packages.wolfi.dev/os
+    keyring:
+      - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+    packages:
+      - busybox
+      - ca-certificates-bundle
+      - curl
+
+# Networking is explicitly enabled (also the default). The pipeline must be able
+# to reach the network; if it cannot, the runner over-restricted and the step
+# fails the build. This guards against regressing the default-on behavior.
+capabilities:
+  networking: true
+
+pipeline:
+  - name: assert network is reachable
+    runs: |
+      if ! curl -sS --max-time 10 -o /dev/null https://example.com; then
+        echo "FAIL: could not reach the network with capabilities.networking=true"
+        exit 1
+      fi
+      echo "OK: network reachable as expected"

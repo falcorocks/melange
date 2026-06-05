@@ -1,0 +1,54 @@
+package:
+  name: net-blocked
+  version: 0.0.1
+  epoch: 0
+  description: asserts the build sandbox has NO network when capabilities.networking is false
+  copyright:
+    - license: Apache-2.0
+
+environment:
+  contents:
+    repositories:
+      - https://packages.wolfi.dev/os
+    keyring:
+      - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+    packages:
+      - busybox
+      - ca-certificates-bundle
+      - curl
+
+# Networking is disabled: the pipeline below must NOT be able to reach the
+# network. If it can, the runner ignored this flag and the step fails the build.
+capabilities:
+  networking: false
+
+pipeline:
+  - name: assert network is blocked
+    runs: |
+      # Only the pipeline runs in the network-restricted sandbox; the build
+      # environment itself is assembled host-side before the runner applies the
+      # capability, so installing the packages above is unaffected.
+      #
+      # Probe two independent paths so a leak on either fails the build:
+      #   1. TCP egress (curl to an external host).
+      #   2. DNS resolution over UDP. This matters for the qemu runner in
+      #      particular: SLIRP restrict=on must also silence its built-in DNS
+      #      responder (10.0.2.3), otherwise name resolution would still work.
+      fail=0
+
+      if curl -sS --max-time 10 -o /dev/null https://example.com; then
+        echo "FAIL: TCP reached example.com with capabilities.networking=false"
+        fail=1
+      else
+        echo "ok: TCP egress blocked"
+      fi
+
+      if timeout 10 nslookup example.com >/dev/null 2>&1; then
+        echo "FAIL: DNS resolved example.com with capabilities.networking=false"
+        fail=1
+      else
+        echo "ok: DNS resolution blocked"
+      fi
+
+      [ "$fail" -eq 0 ] || exit 1
+      echo "OK: network fully blocked (TCP + DNS)"
